@@ -533,14 +533,133 @@ def test_run_with(capsys):
 
 
 @mock.patch("os.execvpe", new=execvpe_mock)
-def test_run_with_cache(capsys, caplog):
-    # Maybe there's a better way to remove the previous venv cache?
-    run_pipx_cli_exit(["run", "--no-cache", "pycowsay", "cowsay", "args"])
-    run_pipx_cli_exit(["run", "pycowsay", "cowsay", "args"], assert_exit=0)
+def test_run_with_cache(capsys, caplog, pipx_temp_env):
+    # First run: install pycowsay with --with black (creates cached venv)
+    run_pipx_cli_exit(["run", "--with", "black", "pycowsay", "args"], assert_exit=0)
 
+    # Second run with the same --with combination should reuse the cached venv
     caplog.set_level(logging.DEBUG)
     caplog.clear()
     run_pipx_cli_exit(["run", "--verbose", "--with", "black", "pycowsay", "args"], assert_exit=0)
     captured = capsys.readouterr()
     assert "Reusing cached venv" in caplog.text
     assert "injected package black into venv pycowsay" in captured.out
+
+
+class TestCacheKeyGeneration:
+    """Unit tests for _get_temporary_venv_path cache key isolation."""
+
+    def _key(self, requirements, python, pip_args, venv_args, backend, dependencies=None):
+        return _get_temporary_venv_path(
+            requirements, python, pip_args, venv_args, backend, dependencies=dependencies
+        )
+
+    def test_deterministic(self, pipx_temp_env):
+        a = self._key(["black"], "python3", ["--index-url", "https://pypi.org"], [], "pip")
+        b = self._key(["black"], "python3", ["--index-url", "https://pypi.org"], [], "pip")
+        assert a == b
+
+    def test_field_boundary_requirements_python(self, pipx_temp_env):
+        # Previously, requirements+python were concatenated without delimiter:
+        #   ["foo"]+"bar" == ["foob"]+"ar" == "foobar"
+        a = self._key(["foo"], "bar", [], [], "pip")
+        b = self._key(["foob"], "ar", [], [], "pip")
+        assert a != b
+
+    def test_field_boundary_pipargs_venvargs(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", ["--foo"], "--bar", "pip")
+        b = self._key(["pkg"], "py", ["--foo--bar"], [], "pip")
+        assert a != b
+
+    def test_field_boundary_venvargs_backend(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", [], ["--ssp"], "pip")
+        b = self._key(["pkg"], "py", [], ["--ss"], "ppip")
+        assert a != b
+
+    def test_element_boundary_in_list(self, pipx_temp_env):
+        # Previously, "".join(["foo","bar"]) == "".join(["foobar"])
+        a = self._key(["foo", "bar"], "py", [], [], "pip")
+        b = self._key(["foobar"], "py", [], [], "pip")
+        assert a != b
+
+    def test_element_boundary_in_pip_args(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", ["--index-url", "https://pypi.org"], [], "pip")
+        b = self._key(["pkg"], "py", ["--index-urlhttps://pypi.org"], [], "pip")
+        assert a != b
+
+    def test_requirements_order_independent(self, pipx_temp_env):
+        a = self._key(["alpha", "beta"], "py", [], [], "pip")
+        b = self._key(["beta", "alpha"], "py", [], [], "pip")
+        assert a == b
+
+    def test_dependencies_order_independent(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", [], [], "pip", dependencies=["x", "y"])
+        b = self._key(["pkg"], "py", [], [], "pip", dependencies=["y", "x"])
+        assert a == b
+
+    def test_different_pip_args(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", ["--pre"], [], "pip")
+        b = self._key(["pkg"], "py", ["--no-binary", ":all:"], [], "pip")
+        assert a != b
+
+    def test_different_venv_args(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", [], [], "pip")
+        b = self._key(["pkg"], "py", [], ["--system-site-packages"], "pip")
+        assert a != b
+
+    def test_different_backend(self, pipx_temp_env):
+        a = self._key(["pkg"], "py", [], [], "pip")
+        b = self._key(["pkg"], "py", [], [], "uv")
+        assert a != b
+
+    def test_different_python(self, pipx_temp_env):
+        a = self._key(["pkg"], "/usr/bin/python3.12", [], [], "pip")
+        b = self._key(["pkg"], "/usr/bin/python3.13", [], [], "pip")
+        assert a != b
+
+    def test_with_deps_affect_key(self, pipx_temp_env):
+        a = self._key(["black"], "py", [], [], "pip")
+        b = self._key(["black"], "py", [], [], "pip", dependencies=["requests"])
+        assert a != b
+
+    def test_different_with_deps(self, pipx_temp_env):
+        a = self._key(["black"], "py", [], [], "pip", dependencies=["requests"])
+        b = self._key(["black"], "py", [], [], "pip", dependencies=["flask"])
+        assert a != b
+
+    def test_output_structure(self, pipx_temp_env):
+        result = self._key(["pkg"], "py", [], [], "pip")
+        assert result.parent == paths.ctx.venv_cache
+        assert len(result.name) == 15
+        # name should be valid hex
+        int(result.name, 16)
+
+
+class TestRemoveExpiredVenvs:
+    """Integration tests for _remove_all_expired_venvs."""
+
+    def test_remove_expired_skips_nondir(self, pipx_temp_env, caplog):
+        """CACHEDIR.TAG and other files should not be treated as expired venvs."""
+        cache_dir = paths.ctx.venv_cache
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a CACHEDIR.TAG file (non-directory)
+        tag_file = cache_dir / "CACHEDIR.TAG"
+        tag_file.write_text("Signature: 8a477f597d28d172789f06886806bc55\n")
+
+        # Create an expired venv directory
+        expired_dir = cache_dir / "expired_venv_dir"
+        expired_dir.mkdir()
+        (expired_dir / "pipx_expired_venv").touch()
+
+        caplog.set_level(logging.INFO)
+        from pipx.commands.run import _remove_all_expired_venvs
+
+        _remove_all_expired_venvs()
+
+        # CACHEDIR.TAG should still exist (not touched by cleanup)
+        assert tag_file.exists()
+        # Expired directory should be removed
+        assert not expired_dir.exists()
+        # No log about removing CACHEDIR.TAG
+        assert "CACHEDIR.TAG" not in caplog.text
