@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import json
 import logging
 import re
 import sys
@@ -139,7 +140,7 @@ def run_script(
         # managed. The requirements are normalised (in
         # _get_requirements_from_script), so that irrelevant differences in
         # whitespace, and similar, don't prevent environment sharing.
-        venv_dir = _get_temporary_venv_path(requirements, python, pip_args, venv_args, resolved_backend or "pip")
+        venv_dir = _get_temporary_venv_path(requirements, python, pip_args, venv_args, resolved_backend or "pip", dependencies=dependencies)
         venv = Venv(venv_dir, backend=backend, env_backend=env_backend)
         _prepare_venv_cache(venv, None, use_cache)
         if venv_dir.exists():
@@ -211,7 +212,7 @@ def run_package(
             """
         )
 
-    venv_dir = _get_temporary_venv_path([package_or_url], python, pip_args, venv_args, resolved_backend or "pip")
+    venv_dir = _get_temporary_venv_path([package_or_url], python, pip_args, venv_args, resolved_backend or "pip", dependencies=dependencies)
 
     venv = Venv(venv_dir, backend=backend, env_backend=env_backend)
     bin_path = venv.bin_path / app_filename
@@ -404,18 +405,28 @@ def _get_temporary_venv_path(
     pip_args: list[str],
     venv_args: list[str],
     backend: str,
+    *,
+    dependencies: list[str] | None = None,
 ) -> Path:
     """Hash venv-affecting inputs to a deterministic cache path.
 
+    Uses JSON serialization so field boundaries and list element boundaries are
+    unambiguous — plain string concatenation would let ``["foo"], "bar"`` and
+    ``["foob"], "ar"`` hash identically.
+
     ``backend`` is part of the key so pip- and uv-backed temp venvs for the
     same package coexist instead of stomping on each other.
+
+    ``dependencies`` (from ``--with``) is part of the key so different extra
+    packages don't contaminate the same cached venv.
     """
     digest = hashlib.sha256()
-    digest.update("".join(requirements).encode())
-    digest.update(python.encode())
-    digest.update("".join(pip_args).encode())
-    digest.update("".join(venv_args).encode())
-    digest.update(backend.encode())
+    key_material = json.dumps(
+        [sorted(requirements), python, pip_args, venv_args, backend, sorted(dependencies or [])],
+        separators=(",", ":"),
+        sort_keys=False,
+    )
+    digest.update(key_material.encode())
     venv_folder_name = digest.hexdigest()[:15]  # 15 chosen arbitrarily
     return Path(paths.ctx.venv_cache) / venv_folder_name
 
@@ -438,6 +449,8 @@ def _prepare_venv_cache(venv: Venv, bin_path: Path | None, use_cache: bool) -> N
 
 def _remove_all_expired_venvs() -> None:
     for venv_dir in Path(paths.ctx.venv_cache).iterdir():
+        if not venv_dir.is_dir():
+            continue
         if _is_temporary_venv_expired(venv_dir):
             _LOGGER.info(f"Removing expired venv {venv_dir!s}")
             rmdir(venv_dir)
