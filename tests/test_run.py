@@ -544,3 +544,104 @@ def test_run_with_cache(capsys, caplog):
     captured = capsys.readouterr()
     assert "Reusing cached venv" in caplog.text
     assert "injected package black into venv pycowsay" in captured.out
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_with_extra_deps_no_pep723(pipx_temp_env, tmp_path):
+    """``--with`` on a plain script (no PEP 723 block) installs the extra dep."""
+    script = tmp_path / "test.py"
+    out = tmp_path / "output.txt"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+                import requests
+                from pathlib import Path
+                Path({str(out)!r}).write_text(requests.__version__)
+            """
+        ).strip()
+    )
+    run_pipx_cli_exit(["run", "--with", "requests==2.31.0", str(script)])
+    assert out.read_text() == "2.31.0"
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_with_extra_deps_and_pep723(pipx_temp_env, tmp_path):
+    """PEP 723 deps + ``--with`` are both installed."""
+    script = tmp_path / "test.py"
+    out = tmp_path / "output.txt"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+                # /// script
+                # dependencies = ["packaging"]
+                # ///
+                import packaging
+                import requests
+                from pathlib import Path
+                Path({str(out)!r}).write_text(requests.__version__)
+            """
+        ).strip()
+    )
+    run_pipx_cli_exit(["run", "--with", "requests==2.31.0", str(script)])
+    assert out.read_text() == "2.31.0"
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_with_invalid_extra_dep(pipx_temp_env, capsys, tmp_path):
+    script = tmp_path / "test.py"
+    script.write_text("print('hello')")
+    ret = run_pipx_cli(["run", "--with", "this is not valid", str(script)])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Invalid --with requirement" in captured.err
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_url_script_with_extra_deps(pipx_temp_env, tmp_path, monkeypatch):
+    """URL script (no PEP 723) + ``--with`` installs the dep via pipx-managed venv."""
+    out = tmp_path / "output.txt"
+    script_content = textwrap.dedent(
+        f"""
+            import requests
+            from pathlib import Path
+            Path({str(out)!r}).write_text(requests.__version__)
+        """
+    ).strip()
+
+    from pipx.commands import run as run_module
+
+    monkeypatch.setattr(run_module, "_http_get_request", lambda url: script_content)
+    run_pipx_cli_exit(
+        ["run", "--with", "requests==2.31.0", "https://example.com/test.py"],
+        assert_exit=0,
+    )
+    assert out.read_text() == "2.31.0"
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="uses named pipe")
+def test_run_pipe_script_with_extra_deps(pipx_temp_env, tmp_path, monkeypatch):
+    """Named-pipe script (no PEP 723) + ``--with`` installs the dep."""
+    out = tmp_path / "output.txt"
+    script_content = textwrap.dedent(
+        f"""
+            import requests
+            from pathlib import Path
+            Path({str(out)!r}).write_text(requests.__version__)
+        """
+    ).strip()
+
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, script_content.encode("utf-8"))
+    os.close(write_fd)
+
+    with monkeypatch.context() as m:
+        m.chdir(tmp_path)
+        try:
+            run_pipx_cli_exit(
+                ["run", "--with", "requests==2.31.0", f"/dev/fd/{read_fd}"],
+                assert_exit=0,
+            )
+        finally:
+            os.close(read_fd)
+    assert out.read_text() == "2.31.0"

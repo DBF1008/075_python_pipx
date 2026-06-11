@@ -93,16 +93,7 @@ def run_script(
 ) -> NoReturn:
     requirements = _get_requirements_from_script(content)
 
-    if dependencies and not requirements:
-        # Plain scripts have nowhere to record extra requirements; the pip path
-        # silently dropped ``--with`` here, but a clear error is better.
-        raise PipxError(
-            "--with packages can only be applied to scripts with PEP 723 inline metadata "
-            "(`# /// script` block). Add the dependencies to the script's metadata or run "
-            "via `pipx run --spec`."
-        )
-
-    if resolved_backend == UV and requirements is not None:
+    if resolved_backend == UV and (requirements is not None or dependencies):
         if script_source is not None:
             run_script_via_uv_run(
                 script_path=script_source,
@@ -128,6 +119,22 @@ def run_script(
                 subsequent_indent=" " * 4,
             )
         )
+
+    # Merge CLI ``--with`` dependencies into the requirements list so they are
+    # installed into the pipx-managed venv and included in the cache key.
+    # The uv fast-path above already returned for local files, so this only
+    # runs for the pip backend or the uv + URL/pipe fallback.
+    if dependencies:
+        extra: list[str] = []
+        for dep in dependencies:
+            try:
+                extra.append(str(Requirement(dep)))
+            except InvalidRequirement as exc:
+                raise PipxError(f"Invalid --with requirement {dep!r}: {exc}") from exc
+        if requirements is None:
+            requirements = extra
+        else:
+            requirements = requirements + extra
 
     if not requirements:
         python_path = Path(python)

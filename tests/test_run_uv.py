@@ -112,6 +112,66 @@ def test_run_script_via_uv_run_uses_uv_run_script(mocker: MockerFixture, fake_uv
     assert cmd == [str(fake_uv), "run", "--script", "--python", "python3.12", str(script), "--quiet"]
 
 
+def test_run_script_via_uv_run_with_extra_deps(mocker: MockerFixture, fake_uv: Path, tmp_path: Path) -> None:
+    exec_mock = mocker.patch("pipx.commands.run_uv.exec_app")
+    script = tmp_path / "demo.py"
+    script.write_text("# /// script\n# dependencies = [\"packaging\"]\n# ///\nprint('hi')\n")
+    run_script_via_uv_run(
+        script_path=script,
+        app_args=[],
+        python="python3.12",
+        pip_args=["--index-url", "https://example.com/simple"],
+        venv_args=[],
+        use_cache=True,
+        verbose=False,
+        dependencies=["requests>=2.0", "click"],
+    )
+    (cmd,), _ = exec_mock.call_args  # type: ignore[unreachable, unused-ignore]
+    assert cmd == [
+        str(fake_uv),
+        "run",
+        "--script",
+        "--python",
+        "python3.12",
+        "--with",
+        "requests>=2.0",
+        "--with",
+        "click",
+        "--index-url",
+        "https://example.com/simple",
+        str(script),
+    ]
+
+
+def test_run_script_via_uv_run_deps_without_pep723(mocker: MockerFixture, fake_uv: Path, tmp_path: Path) -> None:
+    """``--with`` on a script without PEP 723 metadata still forwards deps to uv."""
+    exec_mock = mocker.patch("pipx.commands.run_uv.exec_app")
+    script = tmp_path / "plain.py"
+    script.write_text("print('no metadata')\n")
+    run_script_via_uv_run(
+        script_path=script,
+        app_args=["--verbose"],
+        python="",
+        pip_args=[],
+        venv_args=[],
+        use_cache=False,
+        verbose=True,
+        dependencies=["requests"],
+    )
+    (cmd,), _ = exec_mock.call_args  # type: ignore[unreachable, unused-ignore]
+    assert cmd == [
+        str(fake_uv),
+        "run",
+        "--script",
+        "--no-cache",
+        "--verbose",
+        "--with",
+        "requests",
+        str(script),
+        "--verbose",
+    ]
+
+
 def test_run_via_uv_tool_run_rejects_venv_args(mocker: MockerFixture, fake_uv: Path) -> None:
     mocker.patch("pipx.commands.run_uv.exec_app")
     mocker.patch("pipx.commands.run_uv.which", return_value=None)
