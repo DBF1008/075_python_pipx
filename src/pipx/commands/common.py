@@ -277,16 +277,11 @@ def get_venv_summary(
     # The following is to satisfy mypy that python_version is str and not
     #   Optional[str]
     python_version = venv.pipx_metadata.python_version if venv.pipx_metadata.python_version is not None else ""
-    source_interpreter = venv.pipx_metadata.source_interpreter
-    is_standalone = (
-        str(source_interpreter).startswith(str(paths.ctx.standalone_python_cachedir.resolve()))
-        if source_interpreter
-        else False
-    )
+    python_source = get_python_source(venv.pipx_metadata.source_interpreter)
     return (
         _get_list_output(
             python_version,
-            is_standalone,
+            python_source,
             package_metadata.package_version,
             package_name,
             new_install,
@@ -296,9 +291,25 @@ def get_venv_summary(
             unavailable_man_pages,
             venv.pipx_metadata.injected_packages if include_injected else None,
             suffix=package_metadata.suffix,
+            backend=venv.pipx_metadata.backend,
         ),
         venv_problems,
     )
+
+
+def get_python_source(source_interpreter: Path | None) -> str | None:
+    """Classify the Python interpreter origin.
+
+    Returns ``"standalone"`` when the interpreter lives under the pipx
+    standalone-python cache, ``"system"`` when we have a recorded path that
+    lives elsewhere, or ``None`` when the metadata predates the
+    ``source_interpreter`` field and we simply cannot tell.
+    """
+    if source_interpreter is None:
+        return None
+    if str(source_interpreter).startswith(str(paths.ctx.standalone_python_cachedir.resolve())):
+        return "standalone"
+    return "system"
 
 
 def get_exposed_paths_for_package(
@@ -352,7 +363,7 @@ def get_exposed_man_paths_for_package(
 
 def _get_list_output(
     python_version: str,
-    python_is_standalone: bool,
+    python_source: str | None,
     package_version: str,
     package_name: str,
     new_install: bool,
@@ -362,13 +373,15 @@ def _get_list_output(
     unavailable_man_pages: list[str],
     injected_packages: dict[str, PackageInfo] | None = None,
     suffix: str = "",
+    backend: str = "pip",
 ) -> str:
     output = []
     suffix = f" ({bold(shlex.quote(package_name + suffix))})" if suffix else ""
+    python_source_tag = f" ({python_source})" if python_source else ""
     output.append(
         f"  {'installed' if new_install else ''} package {bold(shlex.quote(package_name))}"
         f" {bold(package_version)}{suffix}, installed using {python_version}"
-        + (" (standalone)" if python_is_standalone else "")
+        f"{python_source_tag}, backend: {backend}"
     )
 
     if new_install and (exposed_binary_names or unavailable_binary_names):
@@ -532,6 +545,7 @@ __all__ = [
     "expose_resources_globally",
     "get_exposed_man_paths_for_package",
     "get_exposed_paths_for_package",
+    "get_python_source",
     "get_venv_summary",
     "package_name_from_spec",
     "run_post_install_actions",

@@ -259,3 +259,137 @@ def test_list_installed_packages_error(monkeypatch, tmp_path, fake_process):
     assert "Failed to execute" in rendered
     assert "Process exited with return code 1" in rendered
     assert "unit test stderr" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Environment observability: backend & python_source
+# ---------------------------------------------------------------------------
+
+
+def test_list_shows_backend_and_python_source(pipx_temp_env, capsys):
+    """Human-readable list output includes backend and python source."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    capsys.readouterr()  # discard install output
+
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+
+    assert "backend: pip" in captured.out
+    # A normal install records the real interpreter → "(system)"
+    assert "(system)" in captured.out
+
+
+def test_list_json_includes_python_source_and_backend(pipx_temp_env, capsys):
+    """JSON list output carries python_source and backend fields."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+
+    data = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    venv_entry = data["venvs"]["pycowsay"]
+
+    # python_source sits at the venv-entry level (not inside metadata)
+    assert venv_entry["python_source"] == "system"
+    # backend lives inside the metadata dict
+    assert venv_entry["metadata"]["backend"] == "pip"
+
+
+@pytest.mark.parametrize("metadata_version", ["0.1", "0.2", "0.3"])
+def test_list_legacy_venv_backend_degradation(pipx_temp_env, capsys, metadata_version):
+    """Legacy metadata missing backend/source_interpreter degrades gracefully."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    mock_legacy_venv("pycowsay", metadata_version=metadata_version)
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+
+    # backend defaults to pip for pre-0.6 metadata
+    assert "backend: pip" in captured.out
+    # source_interpreter is None for pre-0.4 → no source tag in parentheses
+    assert "(system)" not in captured.out
+    assert "(standalone)" not in captured.out
+
+
+@pytest.mark.parametrize("metadata_version", ["0.1", "0.2", "0.3"])
+def test_list_json_legacy_venv_degradation(pipx_temp_env, capsys, metadata_version):
+    """JSON output for legacy venvs shows unknown python_source and pip backend."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    mock_legacy_venv("pycowsay", metadata_version=metadata_version)
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+
+    data = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    venv_entry = data["venvs"]["pycowsay"]
+
+    assert venv_entry["python_source"] == "unknown"
+    assert venv_entry["metadata"]["backend"] == "pip"
+
+
+def test_list_standalone_shows_backend(pipx_temp_env, mocked_github_api, capsys):
+    """Standalone interpreter install shows both (standalone) and backend."""
+    def _which(name):
+        return None
+
+    import shutil as _shutil
+    original_which = _shutil.which
+
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+
+    from unittest.mock import patch
+    with patch.object(_shutil, "which", _which):
+        assert not run_pipx_cli(
+            ["install", "--fetch-python=missing", "--python", f"{major}.{minor}", PKG["pycowsay"]["spec"]]
+        )
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+
+    assert "(standalone)" in captured.out
+    assert "backend: pip" in captured.out
+
+
+def test_list_json_standalone_python_source(pipx_temp_env, mocked_github_api, capsys):
+    """JSON output for standalone interpreter shows python_source=standalone."""
+    def _which(name):
+        return None
+
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+
+    import shutil as _shutil
+    from unittest.mock import patch
+    with patch.object(_shutil, "which", _which):
+        assert not run_pipx_cli(
+            ["install", "--fetch-python=missing", "--python", f"{major}.{minor}", PKG["pycowsay"]["spec"]]
+        )
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+
+    data = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    assert data["venvs"]["pycowsay"]["python_source"] == "standalone"
+
+
+def test_get_python_source_unit(tmp_path):
+    """Unit test for get_python_source classification logic."""
+    from pathlib import Path
+    from pipx.commands.common import get_python_source
+
+    # None → None (legacy metadata, cannot determine)
+    assert get_python_source(None) is None
+
+    # Path under standalone cache → "standalone"
+    standalone_cache = paths.ctx.standalone_python_cachedir.resolve()
+    assert get_python_source(standalone_cache / "cpython-3.11" / "bin" / "python3") == "standalone"
+
+    # Any other path → "system"
+    assert get_python_source(Path("/usr/bin/python3")) == "system"
+    assert get_python_source(Path("/home/user/.pyenv/versions/3.11/bin/python3")) == "system"
