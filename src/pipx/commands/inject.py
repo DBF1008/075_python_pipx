@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shlex
 import sys
 from collections.abc import Generator, Iterable
 from pathlib import Path
@@ -20,6 +21,230 @@ from pipx.venv import Venv
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
 _COMMENT_RE: Final[re.Pattern[str]] = re.compile(r"(^|\s+)#.*$")
+
+# pip options that take a value argument; when they appear in a requirements
+# file they are not package specifications and must be skipped.
+_OPTION_WITH_ARG_RE: Final[re.Pattern[str]] = re.compile(
+    r"""^"""
+    r"""(?:-i|--index-url"""
+    r"""|--extra-index-url"""
+    r"""|-f|--find-links"""
+    r"""|-e|--editable"""
+    r"""|--hash"""
+    r"""|--global-option"""
+    r"""|--config-settings"""
+    r"""|--install-option"""     # deprecated but still recognised
+    r"""|--root"""
+    r"""|--prefix"""
+    r"""|--target"""
+    r"""|--build"""
+    r"""|--src"""
+    r"""|--upgrade-strategy"""
+    r"""|--constraint"""         # handled separately by _extract_include
+    r"""|--requirement"""        # handled separately by _extract_include
+    r"""|[cfier])"""             # short aliases (most already in long list)
+    r"""(?:\s|=)""",
+    re.VERBOSE,
+)
+
+# Standalone pip boolean flags (no argument) that must be skipped.
+_STANDALONE_FLAG_RE: Final[re.Pattern[str]] = re.compile(
+    r"""^"""
+    r"""(?:--no-binary"""
+    r"""|--only-binary"""
+    r"""|--prefer-binary"""
+    r"""|--require-hashes"""
+    r"""|--pre"""
+    r"""|--trusted-host"""
+    r"""|--no-deps"""
+    r"""|--no-clean"""
+    r"""|--no-index"""
+    r"""|--ignore-installed"""
+    r"""|--force-reinstall"""
+    r"""|--user"""
+    r"""|--compile"""
+    r"""|--no-compile"""
+    r"""|--no-build-isolation"""
+    r"""|--use-pep517"""
+    r"""|--no-use-pep517"""
+    r"""|--break-system-packages"""
+    r"""|--disable-pip-version-check"""
+    r"""|--progress-bar"""
+    r"""|--cert"""
+    r"""|--client-cert"""
+    r"""|--proxy"""
+    r"""|--retries"""
+    r"""|--timeout"""
+    r"""|--exists-action"""
+    r"""|--no-input"""
+    r"""|--prefer-tool"""
+    r"""|-[A-Za-z]"""
+    r""")$"""
+)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _join_continued_lines(lines: Iterable[str]) -> Generator[str, None, None]:
+    """Join lines that end with a backslash continuation character.
+
+    Yields one logical line per group of physical lines.
+    """
+    continued = ""
+    for line in lines:
+        stripped = line.rstrip("\n").rstrip("\r")
+        if stripped.endswith("\\"):
+            continued += stripped[:-1]
+        else:
+            yield continued + stripped
+            continued = ""
+    # Handle a trailing backslash on the very last line
+    if continued:
+        yield continued
+
+
+def _strip_comment(line: str) -> str:
+    """Remove inline comments (``# ...`` preceded by whitespace or at BOL)."""
+    return _COMMENT_RE.sub("", line).strip()
+
+
+def _is_pip_option(line: str) -> bool:
+    """Return *True* if *line* looks like a pip CLI option rather than a
+    package specification."""
+    if not line.startswith("-"):
+        return False
+    if _OPTION_WITH_ARG_RE.match(line):
+        return True
+    if _STANDALONE_FLAG_RE.match(line):
+        return True
+    # Fallback: any unrecognised ``--<word>`` flag
+    if line.startswith("--"):
+        return True
+    return False
+
+
+def _extract_include(line: str) -> tuple[str, str] | None:
+    """If *line* is a ``-r``/``--requirement`` or ``-c``/``--constraint``
+    directive, return ``(kind, path)`` where *kind* is ``'r'`` or ``'c'``.
+
+    Returns ``None`` for any other line.
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        # Malformed quoting – treat as a plain package spec
+        return None
+
+    if not tokens:
+        return None
+
+    flag = tokens[0]
+
+    # Short form: -r <path>  /  -c <path>  (also -rpath / -cpath)
+    if flag in ("-r", "-c") and len(tokens) >= 2:
+        return (flag, tokens[1])
+    if flag.startswith("-r") and len(flag) > 2 and not flag[2:].startswith("-"):
+        return ("r", flag[2:])
+    if flag.startswith("-c") and len(flag) > 2 and not flag[2:].startswith("-"):
+        return ("c", flag[2:])
+
+    # Long form: --requirement=<path>  /  --requirement <path>
+    for long_flag, kind in (("--requirement", "r"), ("--constraint", "c")):
+        if flag == long_flag and len(tokens) >= 2:
+            return (kind, tokens[1])
+        if flag.startswith(long_flag + "="):
+            return (kind, flag[len(long_flag) + 1 :])
+
+    return None
+
+
+def _deduplicate_packages(specs: Iterable[str]) -> list[str]:
+    """Deduplicate package specifications by canonical package name.
+
+    For each unique canonical name the **first** occurrence wins, preserving
+    the original insertion order while preventing the same package from being
+    installed more than once.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for spec in specs:
+        name = canonicalize_name(re.split(r"[>=<!~\s@;]", spec, maxsplit=1)[0].strip())
+        if name not in seen:
+            seen.add(name)
+            result.append(spec)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def parse_requirements(
+    filename: str | os.PathLike,
+    *,
+    _visited: set[str] | None = None,
+) -> Generator[str, None, None]:
+    """Parse a pip-style requirements file, yielding package specifications.
+
+    Supported features:
+
+    * **Recursive includes** – ``-r`` / ``--requirement`` directives are
+      followed recursively.
+    * **Constraint files** – ``-c`` / ``--constraint`` directives are
+      followed; entries in constraint files are yielded alongside regular
+      requirements.
+    * **Relative paths** – paths in ``-r`` / ``-c`` directives are resolved
+      relative to the *including* file's directory.
+    * **Line continuations** – a trailing ``\\`` joins the current line with
+      the next one.
+    * **Comments** – full-line and inline ``#`` comments are stripped.
+    * **pip options** – common pip options (``--index-url``, ``-f``, ``-e``,
+      ``--hash``, …) are silently skipped.
+    * **Circular includes** – a file that has already been parsed is not
+      processed again.
+    """
+    filepath = Path(filename).resolve()
+
+    if _visited is None:
+        _visited = set()
+
+    real_path = str(filepath)
+    if real_path in _visited:
+        _LOGGER.debug("Skipping already-visited requirements file: %s", filepath)
+        return
+    _visited.add(real_path)
+
+    if not filepath.is_file():
+        raise PipxError(f"Requirements file not found: {filename}")
+
+    base_dir = filepath.parent
+
+    with open(filepath) as f:
+        for logical_line in _join_continued_lines(f):
+            line = _strip_comment(logical_line)
+            if not line:
+                continue
+
+            # -r / -c include
+            include = _extract_include(line)
+            if include is not None:
+                _kind, rel_path = include
+                yield from parse_requirements(
+                    base_dir / rel_path,
+                    _visited=_visited,
+                )
+                continue
+
+            # Skip pip options that are not package specs
+            if _is_pip_option(line):
+                _LOGGER.debug("Skipping pip option in requirements file: %s", line)
+                continue
+
+            yield line
 
 
 def inject_dep(
@@ -140,8 +365,9 @@ def inject(
     for filename in requirement_files:
         packages.extend(parse_requirements(filename))
 
-    # Remove duplicates and order deterministically
-    packages = sorted(set(packages))
+    # Deduplicate by canonical package name (first-seen wins) and produce a
+    # stable, deterministic ordering.
+    packages = _deduplicate_packages(packages)
 
     if not packages:
         raise PipxError("No packages have been specified.")
@@ -168,20 +394,6 @@ def inject(
 
     # Any failure to install will raise PipxError, otherwise success
     return EXIT_CODE_OK if all_success else EXIT_CODE_INJECT_ERROR
-
-
-def parse_requirements(filename: str | os.PathLike) -> Generator[str, None, None]:
-    """
-    Extract package specifications from requirements file.
-
-    Return all of the non-empty lines with comments removed.
-    """
-    # Based on https://github.com/pypa/pip/blob/main/src/pip/_internal/req/req_file.py
-    with open(filename) as f:
-        for line in f:
-            # Strip comments and filter empty lines
-            if pkgspec := _COMMENT_RE.sub("", line).strip():
-                yield pkgspec
 
 
 __all__ = [
