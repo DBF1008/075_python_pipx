@@ -163,10 +163,10 @@ def parse_specifier_for_install(package_spec: str, pip_args: list[str]) -> tuple
         pip_args.remove("--editable")
 
     for index, option in enumerate(pip_args):
-        if not option.startswith(("-c", "--constraint")):
+        if not option.startswith(("-c", "--constraint", "-r", "--requirement")):
             continue
 
-        if option in ("-c", "--constraint"):
+        if option in ("-c", "--constraint", "-r", "--requirement"):
             argument_index = index + 1
             if argument_index < len(pip_args) and not urllib.parse.urlsplit(pip_args[argument_index]).scheme:
                 pip_args[argument_index] = str(Path(pip_args[argument_index]).expanduser().resolve())
@@ -175,8 +175,6 @@ def parse_specifier_for_install(package_spec: str, pip_args: list[str]) -> tuple
             key, value = option_list
             if not urllib.parse.urlsplit(value).scheme:
                 pip_args[index] = f"{key}={Path(value).expanduser().resolve()}"
-
-        break
 
     return package_or_url, pip_args
 

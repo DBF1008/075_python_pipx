@@ -300,6 +300,61 @@ def test_parse_specifier_for_install(
             ["--constraint=constraints.txt"],
             [f"--constraint={Path('constraints.txt').resolve()}"],
         ),
+        # Multiple -c local files — both must be resolved
+        (
+            ["-c", "constraints1.txt", "-c", "constraints2.txt"],
+            ["-c", str(Path("constraints1.txt").resolve()), "-c", str(Path("constraints2.txt").resolve())],
+        ),
+        # Multiple --constraint= local files
+        (
+            ["--constraint=constraints1.txt", "--constraint=constraints2.txt"],
+            [f"--constraint={Path('constraints1.txt').resolve()}", f"--constraint={Path('constraints2.txt').resolve()}"],
+        ),
+        # Mixed -c and --constraint= forms
+        (
+            ["-c", "constraints1.txt", "--constraint=constraints2.txt"],
+            ["-c", str(Path("constraints1.txt").resolve()), f"--constraint={Path('constraints2.txt').resolve()}"],
+        ),
+        # -r with local file
+        (
+            ["-r", "requirements.txt"],
+            ["-r", str(Path("requirements.txt").resolve())],
+        ),
+        # --requirement with local file
+        (
+            ["--requirement", "requirements.txt"],
+            ["--requirement", str(Path("requirements.txt").resolve())],
+        ),
+        # --requirement= with local file
+        (
+            ["--requirement=requirements.txt"],
+            [f"--requirement={Path('requirements.txt').resolve()}"],
+        ),
+        # -r with URL (unchanged)
+        (
+            ["-r", "https://example.com/requirements.txt"],
+            ["-r", "https://example.com/requirements.txt"],
+        ),
+        # --requirement= with URL (unchanged)
+        (
+            ["--requirement=https://example.com/requirements.txt"],
+            ["--requirement=https://example.com/requirements.txt"],
+        ),
+        # Mixed -c and -r together
+        (
+            ["-c", "constraints.txt", "-r", "requirements.txt"],
+            ["-c", str(Path("constraints.txt").resolve()), "-r", str(Path("requirements.txt").resolve())],
+        ),
+        # Multiple -r files
+        (
+            ["-r", "req1.txt", "-r", "req2.txt"],
+            ["-r", str(Path("req1.txt").resolve()), "-r", str(Path("req2.txt").resolve())],
+        ),
+        # Interleaved with other pip args
+        (
+            ["-c", "constraints.txt", "--no-cache-dir", "-r", "requirements.txt", "--verbose"],
+            ["-c", str(Path("constraints.txt").resolve()), "--no-cache-dir", "-r", str(Path("requirements.txt").resolve()), "--verbose"],
+        ),
     ],
 )
 def test_parse_specifier_for_install_constraint_args(
