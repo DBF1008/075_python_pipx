@@ -142,25 +142,56 @@ def _is_valid_python_index(index: Any) -> bool:
 
 def get_or_update_index(use_cache: bool = True):
     """Get or update the index of available python builds from
-    the python-build-standalone repository."""
+    the python-build-standalone repository.
+
+    When a cached index exists and is still fresh (< 30 days), it is returned
+    directly.  When the cache is stale but structurally valid, a refresh is
+    attempted; if the network call fails (e.g. offline / air-gapped
+    environment), the stale cache is returned with a warning instead of
+    raising.  A corrupted (structurally invalid) cache is never used as a
+    fallback — if refresh also fails in that case the original error
+    propagates.
+    """
     index_file = paths.ctx.standalone_python_cachedir / "index.json"
+    stale_index = None
+
     if use_cache and index_file.exists():
-        index = json.loads(index_file.read_text())
-        # Refresh legacy URL-only indexes, and update current indexes after 30 days.
+        try:
+            index = json.loads(index_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Cached python-build-standalone index is unreadable; will attempt to refresh.")
+            index = {}
+
         if _is_valid_python_index(index):
             fetched = datetime.datetime.fromtimestamp(index["fetched"])
-            if datetime.datetime.now() - fetched > datetime.timedelta(days=30):
-                index = {}
+            if datetime.datetime.now() - fetched <= datetime.timedelta(days=30):
+                return index
+            # Valid but stale — keep as a fallback for offline environments.
+            stale_index = index
+            logger.info(
+                "Cached python-build-standalone index is stale (fetched %s); will attempt to refresh.",
+                fetched.isoformat(),
+            )
         else:
-            index = {}
-    else:
-        index = {}
-    if not index:
+            logger.warning("Cached python-build-standalone index is corrupted; will attempt to refresh.")
+
+    try:
         releases = get_latest_python_releases()
-        index = {"fetched": datetime.datetime.now().timestamp(), "releases": releases}
-        # update index
-        index_file.write_text(json.dumps(index))
-    return index
+    except PipxError:
+        if stale_index is not None:
+            logger.warning(
+                "Unable to refresh the python-build-standalone index from %s; "
+                "falling back to stale cache fetched on %s.",
+                GITHUB_API_URL,
+                datetime.datetime.fromtimestamp(stale_index["fetched"]).isoformat(),
+            )
+            return stale_index
+        raise
+
+    new_index = {"fetched": datetime.datetime.now().timestamp(), "releases": releases}
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    index_file.write_text(json.dumps(new_index))
+    return new_index
 
 
 def get_latest_python_releases() -> list[tuple[str, str]]:
