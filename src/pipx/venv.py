@@ -25,6 +25,7 @@ from pipx.package_specifier import (
     get_extras,
     parse_specifier_for_install,
     parse_specifier_for_metadata,
+    resolve_pip_args_constraints,
 )
 from pipx.pipx_metadata_file import PackageInfo, PipxMetadata
 from pipx.shared_libs import (
@@ -526,6 +527,10 @@ class Venv:
         is_main_package: bool,
         suffix: str = "",
     ) -> None:
+        # Resolve any local constraint file paths so that pip can find them
+        # even when the working directory differs from the original install.
+        pip_args = resolve_pip_args_constraints(pip_args)
+
         _LOGGER.info("Upgrading %s", package_descr := full_package_description(package_name, package_or_url))
         with animate(f"upgrading {package_descr}", self.do_animation):
             process = self.backend.install(

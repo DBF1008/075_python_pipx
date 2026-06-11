@@ -139,6 +139,55 @@ def _parsed_package_to_package_or_url(parsed_package: ParsedPackage, remove_vers
     return package_or_url
 
 
+def resolve_pip_args_constraints(pip_args: list[str]) -> list[str]:
+    """Return a *new* list with every local ``-c`` / ``--constraint`` path
+    resolved to an absolute path.  URL-valued constraints are left untouched.
+
+    All three pip forms are handled:
+
+    * ``-c path``          (two-element pair)
+    * ``--constraint path`` (two-element pair)
+    * ``--constraint=path`` (single element with ``=``)
+
+    Unlike the old single-shot loop this processes **every** occurrence so
+    that multiple constraint files are all normalised consistently.
+    """
+    resolved: list[str] = list(pip_args)  # shallow copy – callers get a fresh list
+
+    index = 0
+    while index < len(resolved):
+        option = resolved[index]
+
+        if not option.startswith(("-c", "--constraint")):
+            index += 1
+            continue
+
+        if option in ("-c", "--constraint"):
+            # Next element is the value.
+            argument_index = index + 1
+            if argument_index < len(resolved):
+                value = resolved[argument_index]
+                if not urllib.parse.urlsplit(value).scheme:
+                    resolved[argument_index] = str(Path(value).expanduser().resolve())
+            # Skip past the value element as well.
+            index += 2
+        elif option.startswith("--constraint="):
+            key, _, value = option.partition("=")
+            if not urllib.parse.urlsplit(value).scheme:
+                resolved[index] = f"{key}={Path(value).expanduser().resolve()}"
+            index += 1
+        elif option.startswith("-c") and len(option) > 2:
+            # Short-flag with value glued on: ``-cpath``
+            value = option[2:]
+            if not urllib.parse.urlsplit(value).scheme:
+                resolved[index] = f"-c{Path(value).expanduser().resolve()}"
+            index += 1
+        else:
+            index += 1
+
+    return resolved
+
+
 def parse_specifier_for_install(package_spec: str, pip_args: list[str]) -> tuple[str, list[str]]:
     """Return package_or_url and pip_args suitable for pip install
 
@@ -146,6 +195,9 @@ def parse_specifier_for_install(package_spec: str, pip_args: list[str]) -> tuple
     * Strip any markers (e.g. python_version > "3.4")
     * Ensure --editable is removed for any package_spec not a local path
     * Convert local paths to absolute paths
+    * Resolve every ``-c`` / ``--constraint`` path in *pip_args* to an
+      absolute path so that pip can find them regardless of working
+      directory.  Multiple constraint files are all handled.
     """
     parsed_package = _parse_specifier(package_spec)
     package_or_url = _parsed_package_to_package_or_url(parsed_package, remove_version_specifiers=False)
@@ -162,21 +214,7 @@ def parse_specifier_for_install(package_spec: str, pip_args: list[str]) -> tuple
         )
         pip_args.remove("--editable")
 
-    for index, option in enumerate(pip_args):
-        if not option.startswith(("-c", "--constraint")):
-            continue
-
-        if option in ("-c", "--constraint"):
-            argument_index = index + 1
-            if argument_index < len(pip_args) and not urllib.parse.urlsplit(pip_args[argument_index]).scheme:
-                pip_args[argument_index] = str(Path(pip_args[argument_index]).expanduser().resolve())
-
-        elif (option_list := option.split("=", maxsplit=1)) and len(option_list) == 2:
-            key, value = option_list
-            if not urllib.parse.urlsplit(value).scheme:
-                pip_args[index] = f"{key}={Path(value).expanduser().resolve()}"
-
-        break
+    pip_args = resolve_pip_args_constraints(pip_args)
 
     return package_or_url, pip_args
 
