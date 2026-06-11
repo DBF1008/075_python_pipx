@@ -45,6 +45,7 @@ MACHINE_SUFFIX: dict[str, dict[str, Any]] = {
 
 GITHUB_API_URL = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
 PYTHON_VERSION_REGEX = re.compile(r"cpython-(\d+\.\d+\.\d+)")
+INDEX_MAX_AGE = datetime.timedelta(days=30)
 
 
 def download_python_build_standalone(python_version: str, override: bool = False):
@@ -142,36 +143,59 @@ def _is_valid_python_index(index: Any) -> bool:
 
 def get_or_update_index(use_cache: bool = True):
     """Get or update the index of available python builds from
-    the python-build-standalone repository."""
+    the python-build-standalone repository.
+
+    When the network is unreachable and a stale but structurally valid
+    cached index exists, it is returned with a warning instead of raising.
+    Corrupt or missing caches still raise when the network is down.
+    """
     index_file = paths.ctx.standalone_python_cachedir / "index.json"
-    if use_cache and index_file.exists():
-        index = json.loads(index_file.read_text())
-        # Refresh legacy URL-only indexes, and update current indexes after 30 days.
-        if _is_valid_python_index(index):
-            fetched = datetime.datetime.fromtimestamp(index["fetched"])
-            if datetime.datetime.now() - fetched > datetime.timedelta(days=30):
-                index = {}
-        else:
-            index = {}
-    else:
-        index = {}
-    if not index:
+
+    # -- load and validate any existing cache --------------------------------
+    cached_index = None
+    if index_file.exists():
+        try:
+            raw = json.loads(index_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            raw = None
+        if raw is not None and _is_valid_python_index(raw):
+            cached_index = raw
+
+    # -- return early if cache is fresh and caller allows it -----------------
+    if use_cache and cached_index is not None:
+        fetched = datetime.datetime.fromtimestamp(cached_index["fetched"])
+        if datetime.datetime.now() - fetched <= INDEX_MAX_AGE:
+            return cached_index
+
+    # -- fetch from network (cache missing, corrupt, stale, or forced) -------
+    try:
         releases = get_latest_python_releases()
-        index = {"fetched": datetime.datetime.now().timestamp(), "releases": releases}
-        # update index
-        index_file.write_text(json.dumps(index))
+    except urllib.error.URLError:
+        if cached_index is not None:
+            fetched_dt = datetime.datetime.fromtimestamp(cached_index["fetched"])
+            logger.warning(
+                "Unable to fetch the latest python-build-standalone release data. "
+                f"Using stale cached index (fetched on {fetched_dt:%Y-%m-%d})."
+            )
+            return cached_index
+        raise PipxError(
+            f"Unable to fetch python-build-standalone release data (from {GITHUB_API_URL}) "
+            "and no usable cached index is available."
+        )
+
+    index = {"fetched": datetime.datetime.now().timestamp(), "releases": releases}
+    index_file.write_text(json.dumps(index))
     return index
 
 
 def get_latest_python_releases() -> list[tuple[str, str]]:
-    """Returns the list of python download links from the latest github release."""
-    try:
-        with urlopen(GITHUB_API_URL) as response:
-            release_data = json.load(response)
+    """Returns the list of python download links from the latest github release.
 
-    except urllib.error.URLError as e:
-        # raise
-        raise PipxError(f"Unable to fetch python-build-standalone release data (from {GITHUB_API_URL}).") from e
+    Raises ``urllib.error.URLError`` on network failure so that callers can
+    decide whether to fall back to a cached index.
+    """
+    with urlopen(GITHUB_API_URL) as response:
+        release_data = json.load(response)
 
     return [(asset["browser_download_url"], asset["digest"]) for asset in release_data["assets"]]
 
