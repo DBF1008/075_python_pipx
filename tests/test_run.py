@@ -544,3 +544,118 @@ def test_run_with_cache(capsys, caplog):
     captured = capsys.readouterr()
     assert "Reusing cached venv" in caplog.text
     assert "injected package black into venv pycowsay" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# --with on scripts without PEP 723 metadata
+# ---------------------------------------------------------------------------
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_with_cli_deps_no_metadata(pipx_temp_env, tmp_path):
+    """Local script without PEP 723 metadata can use --with to pull deps."""
+    script = tmp_path / "test.py"
+    out = tmp_path / "output.txt"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+                import packaging
+                from pathlib import Path
+                Path({str(out)!r}).write_text(packaging.__version__)
+            """
+        ).strip()
+    )
+    run_pipx_cli_exit(["run", "--with", "packaging", str(script)], assert_exit=0)
+    assert out.exists()
+    assert out.read_text()  # non-empty version string
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_url_with_cli_deps_no_metadata(pipx_temp_env, tmp_path):
+    """URL script (file:// URI) without PEP 723 metadata can use --with."""
+    script = tmp_path / "test.py"
+    out = tmp_path / "output.txt"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+                import packaging
+                from pathlib import Path
+                Path({str(out)!r}).write_text(packaging.__version__)
+            """
+        ).strip()
+    )
+    run_pipx_cli_exit(["run", "--with", "packaging", script.as_uri()], assert_exit=0)
+    assert out.exists()
+    assert out.read_text()
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="uses file descriptor")
+def test_run_script_fifo_with_cli_deps_no_metadata(pipx_temp_env, tmp_path):
+    """Named-pipe script without PEP 723 metadata can use --with."""
+    read_fd, write_fd = os.pipe()
+    out = tmp_path / "output.txt"
+    os.write(
+        write_fd,
+        textwrap.dedent(
+            f"""
+                import packaging
+                from pathlib import Path
+                Path({str(out)!r}).write_text(packaging.__version__)
+            """
+        )
+        .strip()
+        .encode("utf-8"),
+    )
+    os.close(write_fd)
+    try:
+        run_pipx_cli_exit(["run", "--with", "packaging", f"/dev/fd/{read_fd}"], assert_exit=0)
+    finally:
+        os.close(read_fd)
+    assert out.exists()
+    assert out.read_text()
+
+
+@mock.patch("os.execvpe", new=execvpe_mock)
+def test_run_script_with_cli_deps_and_metadata(pipx_temp_env, tmp_path):
+    """Script with PEP 723 deps + additional --with dep: both accessible."""
+    script = tmp_path / "test.py"
+    out = tmp_path / "output.txt"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+                # /// script
+                # dependencies = ["packaging"]
+                # ///
+                import packaging
+                import pip_install_test
+                from pathlib import Path
+                Path({str(out)!r}).write_text(
+                    packaging.__version__ + "," + pip_install_test.__version__
+                )
+            """
+        ).strip()
+    )
+    run_pipx_cli_exit(
+        ["run", "--with", "pip-install-test", str(script)],
+        assert_exit=0,
+    )
+    assert out.exists()
+    parts = out.read_text().split(",")
+    assert len(parts) == 2
+    assert all(parts)
+
+
+def test_run_script_cli_deps_affect_cache_key(pipx_temp_env):
+    """Different --with sets must produce different cache directories."""
+    from pipx.commands.run import _get_temporary_venv_path
+
+    base = _get_temporary_venv_path(["requests"], "python3", [], [], "pip")
+    with_click = _get_temporary_venv_path(["requests", "click"], "python3", [], [], "pip")
+    with_rich = _get_temporary_venv_path(["requests", "rich"], "python3", [], [], "pip")
+    no_deps = _get_temporary_venv_path([], "python3", [], [], "pip")
+
+    assert base != with_click
+    assert base != with_rich
+    assert with_click != with_rich
+    assert base != no_deps

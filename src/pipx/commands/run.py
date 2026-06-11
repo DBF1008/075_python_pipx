@@ -93,16 +93,13 @@ def run_script(
 ) -> NoReturn:
     requirements = _get_requirements_from_script(content)
 
-    if dependencies and not requirements:
-        # Plain scripts have nowhere to record extra requirements; the pip path
-        # silently dropped ``--with`` here, but a clear error is better.
-        raise PipxError(
-            "--with packages can only be applied to scripts with PEP 723 inline metadata "
-            "(`# /// script` block). Add the dependencies to the script's metadata or run "
-            "via `pipx run --spec`."
-        )
+    # Merge PEP 723 requirements with CLI ``--with`` dependencies so that
+    # scripts without inline metadata can still receive extra packages.
+    all_requirements = list(requirements or [])
+    if dependencies:
+        all_requirements.extend(dependencies)
 
-    if resolved_backend == UV and requirements is not None:
+    if resolved_backend == UV and (requirements is not None or dependencies):
         if script_source is not None:
             run_script_via_uv_run(
                 script_path=script_source,
@@ -129,7 +126,7 @@ def run_script(
             )
         )
 
-    if not requirements:
+    if not all_requirements:
         python_path = Path(python)
     else:
         # Note that the environment name is based on the identified
@@ -139,7 +136,7 @@ def run_script(
         # managed. The requirements are normalised (in
         # _get_requirements_from_script), so that irrelevant differences in
         # whitespace, and similar, don't prevent environment sharing.
-        venv_dir = _get_temporary_venv_path(requirements, python, pip_args, venv_args, resolved_backend or "pip")
+        venv_dir = _get_temporary_venv_path(all_requirements, python, pip_args, venv_args, resolved_backend or "pip")
         venv = Venv(venv_dir, backend=backend, env_backend=env_backend)
         _prepare_venv_cache(venv, None, use_cache)
         if venv_dir.exists():
@@ -149,7 +146,7 @@ def run_script(
             venv.check_upgrade_shared_libs(pip_args=pip_args, verbose=verbose)
             venv.create_venv(venv_args, pip_args)
             try:
-                venv.install_unmanaged_packages(requirements, pip_args)
+                venv.install_unmanaged_packages(all_requirements, pip_args)
             except:
                 # Package installation failed, so mark the cache as expired.
                 # This ensures an attempt is made to re-install requirements

@@ -127,3 +127,70 @@ def test_run_via_uv_tool_run_rejects_venv_args(mocker: MockerFixture, fake_uv: P
             use_cache=True,
             verbose=False,
         )
+
+
+def test_run_script_via_uv_run_with_cli_deps_no_metadata(
+    mocker: MockerFixture, fake_uv: Path, tmp_path: Path
+) -> None:
+    """Scripts without PEP 723 metadata should still emit --with flags via uv run --script."""
+    exec_mock = mocker.patch("pipx.commands.run_uv.exec_app")
+    script = tmp_path / "plain.py"
+    script.write_text("print('hi')\n")
+    run_script_via_uv_run(
+        script_path=script,
+        app_args=[],
+        python="python3.12",
+        pip_args=[],
+        venv_args=[],
+        use_cache=True,
+        verbose=False,
+        dependencies=["requests", "click"],
+    )
+    (cmd,), _ = exec_mock.call_args  # type: ignore[unreachable, unused-ignore]
+    assert cmd == [
+        str(fake_uv),
+        "run",
+        "--script",
+        "--python",
+        "python3.12",
+        "--with",
+        "requests",
+        "--with",
+        "click",
+        str(script),
+    ]
+
+
+def test_run_script_uv_fallback_for_url_with_deps(
+    mocker: MockerFixture, fake_uv: Path
+) -> None:
+    """URL script content (no on-disk path) under uv backend should fall through
+    to the venv path instead of calling uv run --script."""
+    from pipx.backends import UV
+    from pipx.commands.run import run_script
+
+    uv_script_mock = mocker.patch("pipx.commands.run.run_script_via_uv_run")
+    exec_mock = mocker.patch("pipx.commands.run.exec_app")
+    mocker.patch("pipx.commands.run.Venv")
+    mocker.patch("pipx.commands.run._prepare_venv_cache")
+    mocker.patch("pipx.commands.run._get_temporary_venv_path", return_value=Path("/fake/venv"))
+
+    run_script(
+        content="import requests\nprint('ok')\n",
+        app_args=[],
+        python="/usr/bin/python3",
+        pip_args=[],
+        venv_args=[],
+        verbose=False,
+        use_cache=True,
+        backend=None,
+        env_backend=None,
+        resolved_backend=UV,
+        script_source=None,
+        dependencies=["requests"],
+    )
+
+    # uv run --script must NOT have been invoked (no on-disk path)
+    uv_script_mock.assert_not_called()
+    # The venv fallback path should have called exec_app
+    exec_mock.assert_called_once()
