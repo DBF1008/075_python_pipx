@@ -233,6 +233,28 @@ def venv_health_check(venv: Venv, package_name: str | None = None) -> tuple[Venv
     return (VenvProblems(), "")
 
 
+def interpreter_source(source_interpreter: Path | None) -> str:
+    """Classify the interpreter source for display.
+
+    Returns one of ``"standalone"``, ``"system"``, or ``"unknown"``.
+
+    * ``standalone`` – the recorded interpreter lives under pipx's
+      standalone-python cache (downloaded via ``--fetch-python``).
+    * ``system`` – a regular interpreter found on the host.
+    * ``unknown`` – the metadata predates the ``source_interpreter`` field
+      (pre-0.4) or could not be resolved at install time.
+    """
+    if source_interpreter is None:
+        return "unknown"
+    try:
+        standalone_dir = paths.ctx.standalone_python_cachedir.resolve()
+    except OSError:
+        return "unknown"
+    if str(source_interpreter).startswith(str(standalone_dir)):
+        return "standalone"
+    return "system"
+
+
 def get_venv_summary(
     venv_dir: Path,
     *,
@@ -278,15 +300,11 @@ def get_venv_summary(
     #   Optional[str]
     python_version = venv.pipx_metadata.python_version if venv.pipx_metadata.python_version is not None else ""
     source_interpreter = venv.pipx_metadata.source_interpreter
-    is_standalone = (
-        str(source_interpreter).startswith(str(paths.ctx.standalone_python_cachedir.resolve()))
-        if source_interpreter
-        else False
-    )
+    interp_source = interpreter_source(source_interpreter)
     return (
         _get_list_output(
             python_version,
-            is_standalone,
+            interp_source,
             package_metadata.package_version,
             package_name,
             new_install,
@@ -296,6 +314,7 @@ def get_venv_summary(
             unavailable_man_pages,
             venv.pipx_metadata.injected_packages if include_injected else None,
             suffix=package_metadata.suffix,
+            backend=venv.pipx_metadata.backend,
         ),
         venv_problems,
     )
@@ -352,7 +371,7 @@ def get_exposed_man_paths_for_package(
 
 def _get_list_output(
     python_version: str,
-    python_is_standalone: bool,
+    interpreter_source: str,
     package_version: str,
     package_name: str,
     new_install: bool,
@@ -362,13 +381,16 @@ def _get_list_output(
     unavailable_man_pages: list[str],
     injected_packages: dict[str, PackageInfo] | None = None,
     suffix: str = "",
+    backend: str | None = None,
 ) -> str:
     output = []
     suffix = f" ({bold(shlex.quote(package_name + suffix))})" if suffix else ""
+    interp_part = f" ({interpreter_source})" if interpreter_source != "unknown" else ""
+    backend_part = f", backend {bold(backend)}" if backend else ""
     output.append(
         f"  {'installed' if new_install else ''} package {bold(shlex.quote(package_name))}"
         f" {bold(package_version)}{suffix}, installed using {python_version}"
-        + (" (standalone)" if python_is_standalone else "")
+        f"{interp_part}{backend_part}"
     )
 
     if new_install and (exposed_binary_names or unavailable_binary_names):
@@ -533,6 +555,7 @@ __all__ = [
     "get_exposed_man_paths_for_package",
     "get_exposed_paths_for_package",
     "get_venv_summary",
+    "interpreter_source",
     "package_name_from_spec",
     "run_post_install_actions",
     "venv_health_check",

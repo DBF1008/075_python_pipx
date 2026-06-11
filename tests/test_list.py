@@ -259,3 +259,88 @@ def test_list_installed_packages_error(monkeypatch, tmp_path, fake_process):
     assert "Failed to execute" in rendered
     assert "Process exited with return code 1" in rendered
     assert "unit test stderr" in rendered
+
+
+def test_list_text_shows_backend(pipx_temp_env, capsys):
+    """Text output must display the recorded backend for each venv."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+    assert "backend pip" in captured.out
+
+
+def test_list_text_shows_interpreter_source_system(pipx_temp_env, capsys):
+    """When the source interpreter is a host binary, text output shows (system)."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+    assert "(system)" in captured.out
+
+
+def test_list_json_has_interpreter_source(pipx_temp_env, capsys):
+    """JSON output must include the interpreter_source field per venv."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+    json_parsed = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    pycowsay_entry = json_parsed["venvs"]["pycowsay"]
+    assert "interpreter_source" in pycowsay_entry
+    assert pycowsay_entry["interpreter_source"] == "system"
+    # backend must also be visible inside metadata
+    assert pycowsay_entry["metadata"]["backend"] == "pip"
+
+
+def test_list_standalone_json_interpreter_source(pipx_temp_env, monkeypatch, mocked_github_api, capsys):
+    """JSON output must report interpreter_source='standalone' for fetched interpreters."""
+
+    def which(name):
+        return None
+
+    monkeypatch.setattr(shutil, "which", which)
+
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+    target_python = f"{major}.{minor}"
+
+    assert not run_pipx_cli(
+        [
+            "install",
+            "--fetch-python=missing",
+            "--python",
+            target_python,
+            PKG["pycowsay"]["spec"],
+        ]
+    )
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+    json_parsed = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    assert json_parsed["venvs"]["pycowsay"]["interpreter_source"] == "standalone"
+
+
+@pytest.mark.parametrize("metadata_version", ["0.1", "0.2", "0.3", "0.4", "0.5"])
+def test_list_legacy_json_interpreter_source(pipx_temp_env, capsys, metadata_version):
+    """Legacy metadata must degrade gracefully: interpreter_source is 'unknown'
+    when source_interpreter is absent, and backend falls back to 'pip'."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    mock_legacy_venv("pycowsay", metadata_version=metadata_version)
+
+    assert not run_pipx_cli(["list", "--json"])
+    captured = capsys.readouterr()
+    json_parsed = json.loads(captured.out, object_hook=_json_decoder_object_hook)
+    pycowsay_entry = json_parsed["venvs"]["pycowsay"]
+    # All legacy versions should degrade to "unknown" since source_interpreter
+    # is absent (pre-0.4) or the field was never written.
+    assert pycowsay_entry["interpreter_source"] == "unknown"
+    # backend must always fall back to "pip" for pre-0.6 metadata
+    assert pycowsay_entry["metadata"]["backend"] == "pip"
+
+
+@pytest.mark.parametrize("metadata_version", ["0.4", "0.5"])
+def test_list_legacy_text_shows_backend(pipx_temp_env, capsys, metadata_version):
+    """Even with legacy metadata, text output should show the defaulted backend."""
+    assert not run_pipx_cli(["install", PKG["pycowsay"]["spec"]])
+    mock_legacy_venv("pycowsay", metadata_version=metadata_version)
+
+    assert not run_pipx_cli(["list"])
+    captured = capsys.readouterr()
+    assert "backend pip" in captured.out

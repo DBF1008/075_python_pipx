@@ -7,7 +7,7 @@ from typing import Any
 
 from pipx import paths
 from pipx.colors import bold
-from pipx.commands.common import VenvProblems, get_venv_summary, venv_health_check
+from pipx.commands.common import VenvProblems, get_venv_summary, interpreter_source, venv_health_check
 from pipx.constants import EXIT_CODE_LIST_PROBLEM, EXIT_CODE_OK, ExitCode
 from pipx.emojis import sleep
 from pipx.pipx_metadata_file import JsonEncoderHandlesPath, PipxMetadata
@@ -77,6 +77,9 @@ def list_json(venv_dirs: Collection[Path]) -> VenvProblems:
 
         spec_metadata["venvs"][venv_dir.name] = {}
         spec_metadata["venvs"][venv_dir.name]["metadata"] = venv_metadata.to_dict()
+        spec_metadata["venvs"][venv_dir.name]["interpreter_source"] = interpreter_source(
+            venv_metadata.source_interpreter
+        )
 
     print(json.dumps(spec_metadata, indent=4, sort_keys=True, cls=JsonEncoderHandlesPath))
     for warning_message in warning_messages:

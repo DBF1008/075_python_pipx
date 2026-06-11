@@ -15,7 +15,7 @@ from pipx import constants, main, paths, pipx_metadata_file, util
 
 WIN = sys.platform.startswith("win")
 
-PIPX_METADATA_LEGACY_VERSIONS = [None, "0.1", "0.2", "0.3"]
+PIPX_METADATA_LEGACY_VERSIONS = [None, "0.1", "0.2", "0.3", "0.4", "0.5"]
 
 MOCK_PIPXMETADATA_0_1: dict[str, Any] = {
     "main_package": None,
@@ -43,6 +43,33 @@ MOCK_PIPXMETADATA_0_3: dict[str, Any] = {
     "man_paths": [],
     "man_pages_of_dependencies": [],
     "man_paths_of_dependencies": {},
+}
+
+MOCK_PIPXMETADATA_0_4: dict[str, Any] = {
+    "main_package": None,
+    "python_version": None,
+    "source_interpreter": None,
+    "venv_args": [],
+    "injected_packages": {},
+    "pipx_metadata_version": "0.4",
+    "man_pages": [],
+    "man_paths": [],
+    "man_pages_of_dependencies": [],
+    "man_paths_of_dependencies": {},
+}
+
+MOCK_PIPXMETADATA_0_5: dict[str, Any] = {
+    "main_package": None,
+    "python_version": None,
+    "source_interpreter": None,
+    "venv_args": [],
+    "injected_packages": {},
+    "pipx_metadata_version": "0.5",
+    "man_pages": [],
+    "man_paths": [],
+    "man_pages_of_dependencies": [],
+    "man_paths_of_dependencies": {},
+    "pinned": False,
 }
 
 MOCK_PACKAGE_INFO_0_1: dict[str, Any] = {
@@ -93,7 +120,7 @@ def unwrap_log_text(log_text: str):
 
 
 def _mock_legacy_package_info(modern_package_info: dict[str, Any], metadata_version: str) -> dict[str, Any]:
-    if metadata_version in ["0.2", "0.3"]:
+    if metadata_version in ["0.2", "0.3", "0.4", "0.5"]:
         mock_package_info_template = MOCK_PACKAGE_INFO_0_2
     elif metadata_version == "0.1":
         mock_package_info_template = MOCK_PACKAGE_INFO_0_1
@@ -114,9 +141,13 @@ def mock_legacy_venv(venv_name: str, metadata_version: str | None = None) -> Non
     """
     venv_dir = Path(paths.ctx.venvs) / canonicalize_name(venv_name)
 
-    if metadata_version == "0.4":
+    if metadata_version == "0.6":
         # Current metadata version, do nothing
         return
+    elif metadata_version == "0.5":
+        mock_pipx_metadata_template = MOCK_PIPXMETADATA_0_5
+    elif metadata_version == "0.4":
+        mock_pipx_metadata_template = MOCK_PIPXMETADATA_0_4
     elif metadata_version == "0.3":
         mock_pipx_metadata_template = MOCK_PIPXMETADATA_0_3
     elif metadata_version == "0.2":
