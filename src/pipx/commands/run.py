@@ -409,12 +409,22 @@ def _get_temporary_venv_path(
 
     ``backend`` is part of the key so pip- and uv-backed temp venvs for the
     same package coexist instead of stomping on each other.
+
+    Each list is joined with a null byte so that distinct element boundaries
+    produce distinct digests (e.g. ``["ab", "cd"]`` vs ``["abc", "d"]``).
+    Fields are likewise separated by null bytes to prevent cross-field
+    collisions.
     """
+    _SEP = b"\0"
     digest = hashlib.sha256()
-    digest.update("".join(requirements).encode())
+    digest.update(_SEP.join(r.encode() for r in requirements))
+    digest.update(_SEP)
     digest.update(python.encode())
-    digest.update("".join(pip_args).encode())
-    digest.update("".join(venv_args).encode())
+    digest.update(_SEP)
+    digest.update(_SEP.join(a.encode() for a in pip_args))
+    digest.update(_SEP)
+    digest.update(_SEP.join(a.encode() for a in venv_args))
+    digest.update(_SEP)
     digest.update(backend.encode())
     venv_folder_name = digest.hexdigest()[:15]  # 15 chosen arbitrarily
     return Path(paths.ctx.venv_cache) / venv_folder_name
